@@ -331,15 +331,22 @@
         messagesEl.appendChild(assistantBubble);
         messagesEl.scrollTop = messagesEl.scrollHeight;
 
-        const response = await fetch('http://127.0.0.1:8000/chat/stream', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages: thread.messages,
-            thread_id: thread.id,
-            thread_title: thread.title
-          })
+        const response = await fetch('/chat/stream', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                messages: thread.messages,
+                thread_id: thread.id,
+                thread_title: thread.title
+            })
         });
+
+        if (!response.ok) {
+            assistantBubble.innerText = `Server Error (${response.status})`;
+            return;
+        }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
