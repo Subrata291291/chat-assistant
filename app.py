@@ -1,7 +1,9 @@
 import os
 import json
 import time
+import traceback
 from typing import List, Dict, Optional
+
 from dotenv import load_dotenv
 from groq import Groq
 from fastapi import FastAPI, HTTPException
@@ -11,7 +13,17 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-app = FastAPI(title="ChatGPT Clone", version="1.0.0")
+print("=" * 60)
+print("Starting Chat Assistant...")
+print("GROQ_API_KEY Loaded:", bool(os.getenv("GROQ_API_KEY")))
+print("GROQ_MODEL:", os.getenv("GROQ_MODEL"))
+print("=" * 60)
+
+app = FastAPI(
+    title="ChatGPT Clone",
+    version="1.0.0"
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,98 +55,221 @@ conversation_memory: Dict[str, List[ChatMessage]] = {}
 thread_titles: Dict[str, str] = {}
 
 
-def sync_thread_conversation(thread_id: str, messages: List[ChatMessage], title: Optional[str] = None) -> List[ChatMessage]:
+def sync_thread_conversation(
+    thread_id: str,
+    messages: List[ChatMessage],
+    title: Optional[str] = None,
+):
     if title:
         thread_titles[thread_id] = title
 
-    trimmed = messages[-16:] if len(messages) > 16 else messages
-    conversation_memory[thread_id] = trimmed
-    return trimmed
+    conversation = messages[-16:]
+    conversation_memory[thread_id] = conversation
+    return conversation
 
 
-def get_reply_from_groq(messages: List[ChatMessage]) -> tuple[str, str]:
+def get_reply_from_groq(messages: List[ChatMessage]):
+
     api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        fallback = (
-            "Groq API key not found. "
-            "Set GROQ_API_KEY in your environment to use the real model. "
-            "The demo is running in fallback mode."
-        )
-        return fallback, "fallback"
 
-    client = Groq(api_key=api_key)
+    if not api_key:
+        print("ERROR: GROQ_API_KEY NOT FOUND")
+        return (
+            "Groq API key is missing. Please configure GROQ_API_KEY in Render.",
+            "fallback",
+        )
+
     model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[{"role": m.role, "content": m.content} for m in messages],
-        temperature=0.7,
-    )
-    return completion.choices[0].message.content, "groq"
+
+    print(f"Using model: {model}")
+
+    try:
+
+        client = Groq(api_key=api_key)
+
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": m.role,
+                    "content": m.content,
+                }
+                for m in messages
+            ],
+            temperature=0.7,
+        )
+
+        reply = completion.choices[0].message.content
+
+        print("Groq Reply Generated Successfully")
+
+        return reply, "groq"
+
+    except Exception as e:
+
+        print("=" * 60)
+        print("GROQ ERROR")
+        traceback.print_exc()
+        print("=" * 60)
+
+        return (
+            f"Groq Error: {str(e)}",
+            "error",
+        )
 
 
 @app.get("/", response_class=HTMLResponse)
-def root() -> HTMLResponse:
-    with open("templates/index.html", "r", encoding="utf-8") as handle:
-        return HTMLResponse(content=handle.read())
+def root():
+
+    with open(
+        "templates/index.html",
+        "r",
+        encoding="utf-8",
+    ) as f:
+        return HTMLResponse(f.read())
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest) -> ChatResponse:
-    if not request.messages:
-        raise HTTPException(status_code=400, detail="Messages cannot be empty")
+def chat(request: ChatRequest):
 
-    last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
-    if not last_user_message:
-        raise HTTPException(status_code=400, detail="A user message is required")
+    print("/chat called")
+
+    if not request.messages:
+        raise HTTPException(
+            status_code=400,
+            detail="Messages cannot be empty",
+        )
 
     thread_id = request.thread_id or "default"
-    conversation = sync_thread_conversation(thread_id, request.messages, request.thread_title)
+
+    conversation = sync_thread_conversation(
+        thread_id,
+        request.messages,
+        request.thread_title,
+    )
 
     reply, provider = get_reply_from_groq(conversation)
-    conversation.append(ChatMessage(role="assistant", content=reply))
-    conversation_memory[thread_id] = conversation[-16:] if len(conversation) > 16 else conversation
 
-    return ChatResponse(reply=reply, model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"), provider=provider)
+    conversation.append(
+        ChatMessage(
+            role="assistant",
+            content=reply,
+        )
+    )
+
+    conversation_memory[thread_id] = conversation[-16:]
+
+    return ChatResponse(
+        reply=reply,
+        model=os.getenv(
+            "GROQ_MODEL",
+            "llama-3.3-70b-versatile",
+        ),
+        provider=provider,
+    )
 
 
 @app.post("/chat/stream")
 def chat_stream(request: ChatRequest):
+
+    print("/chat/stream called")
+
     if not request.messages:
-        raise HTTPException(status_code=400, detail="Messages cannot be empty")
+        raise HTTPException(
+            status_code=400,
+            detail="Messages cannot be empty",
+        )
 
     thread_id = request.thread_id or "default"
-    conversation = sync_thread_conversation(thread_id, request.messages, request.thread_title)
+
+    conversation = sync_thread_conversation(
+        thread_id,
+        request.messages,
+        request.thread_title,
+    )
 
     reply, provider = get_reply_from_groq(conversation)
-    conversation.append(ChatMessage(role="assistant", content=reply))
-    conversation_memory[thread_id] = conversation[-16:] if len(conversation) > 16 else conversation
+
+    conversation.append(
+        ChatMessage(
+            role="assistant",
+            content=reply,
+        )
+    )
+
+    conversation_memory[thread_id] = conversation[-16:]
 
     def event_stream():
-        words = reply.split()
-        for index, word in enumerate(words):
-            prefix = " " if index else ""
-            chunk = prefix + word
-            payload = json.dumps({"delta": chunk, "provider": provider})
-            yield f"data: {payload}\n\n"
-            time.sleep(0.05)
-        yield "event: done\ndata: {}\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+        try:
+
+            words = reply.split()
+
+            for i, word in enumerate(words):
+
+                payload = json.dumps(
+                    {
+                        "delta": (" " if i else "") + word,
+                        "provider": provider,
+                    }
+                )
+
+                yield f"data: {payload}\n\n"
+
+                time.sleep(0.03)
+
+            yield "event: done\ndata: {}\n\n"
+
+        except Exception:
+
+            traceback.print_exc()
+
+            yield (
+                'data: {"delta":"Streaming Error"}\n\n'
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+    )
 
 
 @app.get("/threads")
-def get_threads() -> List[Dict[str, str]]:
+def get_threads():
+
     result = []
+
     for thread_id, history in conversation_memory.items():
+
         preview = ""
-        for message in reversed(history):
-            if message.role == "user" and message.content.strip():
-                preview = message.content.strip()
+
+        for msg in reversed(history):
+
+            if msg.role == "user":
+
+                preview = msg.content
+
                 break
-        result.append({"id": thread_id, "title": thread_titles.get(thread_id, preview[:30] or "New chat"), "preview": preview})
+
+        result.append(
+            {
+                "id": thread_id,
+                "title": thread_titles.get(
+                    thread_id,
+                    preview[:30] or "New chat",
+                ),
+                "preview": preview,
+            }
+        )
+
     return result
 
 
 @app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
+def health():
+
+    return {
+        "status": "ok",
+        "groq_key_loaded": bool(os.getenv("GROQ_API_KEY")),
+        "model": os.getenv("GROQ_MODEL"),
+    }
